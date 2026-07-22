@@ -1,5 +1,6 @@
 import streamlit as st
 
+from advisor.advisor_service import get_suggestions
 from pawpal_system import Owner, Pet, Task, Scheduler
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
@@ -45,7 +46,7 @@ with st.form("add_pet_form", clear_on_submit=True):
     with pcol1:
         new_pet_name = st.text_input("Pet name", value="")
     with pcol2:
-        new_species = st.selectbox("Species", ["dog", "cat", "other"])
+        new_species = st.selectbox("Species", ["dog", "cat", "rabbit", "other"])
 
     if st.form_submit_button("Add pet"):
         if new_pet_name.strip():
@@ -133,6 +134,71 @@ else:
                     st.rerun()
     else:
         st.info("No tasks yet. Add one above.")
+
+st.divider()
+
+# --- AI care advisor (RAG) ----------------------------------------------------
+st.subheader("🤖 AI Care Advisor")
+st.caption(
+    "Retrieves grounded care guidance from a local knowledge base and asks Gemini to "
+    "suggest tasks for a chosen pet. Suggestions are validated by a guardrail layer "
+    "before you can add them to the real task list — nothing is added automatically."
+)
+
+if not owner.pets:
+    st.info("Add a pet first before requesting AI suggestions.")
+else:
+    advisor_pet_name = st.selectbox("Pet to get suggestions for", [pet.name for pet in owner.pets], key="advisor_pet")
+    advisor_context = st.text_input(
+        "Optional context (e.g. \"senior dog, low energy\")", value="", key="advisor_context"
+    )
+
+    if st.button("Suggest tasks with AI"):
+        advisor_pet = next(pet for pet in owner.pets if pet.name == advisor_pet_name)
+        with st.spinner("Retrieving care guidance and asking Gemini..."):
+            result = get_suggestions(
+                pet_name=advisor_pet.name, species=advisor_pet.species, context=advisor_context
+            )
+        st.session_state.advisor_result = result
+        st.session_state.advisor_result_pet = advisor_pet.name
+
+    result = st.session_state.get("advisor_result")
+    result_pet_name = st.session_state.get("advisor_result_pet")
+
+    if result is not None and result_pet_name == advisor_pet_name:
+        if result.error:
+            st.error(f"AI advisor unavailable: {result.error}")
+        else:
+            st.caption(f"Retrieved knowledge base docs: {', '.join(result.retrieved_doc_ids)}")
+
+            if result.rejected:
+                st.warning(f"⚠️ {len(result.rejected)} suggestion(s) blocked by guardrails (see below).")
+                with st.expander("Why were suggestions blocked?"):
+                    for r in result.rejected:
+                        st.write(f"- {r.reason}")
+
+            for i, suggestion in enumerate(result.accepted):
+                with st.container(border=True):
+                    st.write(
+                        f"**{suggestion['title']}** — {suggestion['duration_minutes']} min, "
+                        f"{suggestion['priority']} priority, {suggestion['frequency']}"
+                        + (f", at {suggestion['time']}" if suggestion["time"] else "")
+                    )
+                    st.caption(suggestion["rationale"])
+                    st.caption(f"Source: {', '.join(suggestion['source_doc_ids']) or 'n/a'}")
+                    if st.button("Accept into task list", key=f"accept-{i}-{result_pet_name}"):
+                        advisor_pet = next(pet for pet in owner.pets if pet.name == advisor_pet_name)
+                        advisor_pet.add_task(
+                            Task(
+                                title=suggestion["title"],
+                                duration_minutes=suggestion["duration_minutes"],
+                                priority=suggestion["priority"],
+                                time=suggestion["time"],
+                                frequency=suggestion["frequency"],
+                            )
+                        )
+                        st.success(f"Added '{suggestion['title']}' to {advisor_pet_name}'s task list.")
+                        st.rerun()
 
 st.divider()
 

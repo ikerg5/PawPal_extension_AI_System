@@ -1,0 +1,42 @@
+flowchart TD
+    Owner["Owner enters pet + optional context\n(Streamlit UI)"]
+
+    subgraph RAG["AI Care Advisor (advisor/)"]
+        Retriever["Retriever\nkeyword/tag match over knowledge_base/*.md"]
+        KB[("knowledge_base/\ndog_care.md, cat_care.md,\nrabbit_care.md, general_safety.md")]
+        PromptBuilder["Prompt builder\nsystem + retrieved context + pet info"]
+        Gemini["Gemini API\n(google-genai SDK)"]
+        Guardrail["Guardrail / validator\nblock unsafe content, clamp ranges,\nparse JSON safely"]
+        Logger[("logs/advisor_log.jsonl\ntimestamp, doc ids, raw output,\nguardrail verdicts")]
+    end
+
+    HumanCheck{"User reviews suggestions\n(human checkpoint)"}
+    Accept["Accepted suggestion ->\nreal Task object via Pet.add_task()"]
+    Reject["Rejected / not accepted\n(discarded, stays out of task list)"]
+
+    subgraph Core["Existing PawPal+ core (unchanged)"]
+        TaskList["Pet.tasks"]
+        Scheduler["Scheduler\nsort_by_priority, filter_by_time,\ndetect_conflicts"]
+        Plan["DailyPlan output"]
+    end
+
+    Owner --> Retriever
+    KB --> Retriever
+    Retriever -->|retrieved doc ids + text| PromptBuilder
+    PromptBuilder --> Gemini
+    Gemini -->|raw JSON text| Guardrail
+    Guardrail -->|logs every call| Logger
+    Guardrail -->|validated suggestions| HumanCheck
+    Guardrail -.->|blocked suggestions shown w/ reason| HumanCheck
+
+    HumanCheck -->|accept| Accept
+    HumanCheck -->|reject / ignore| Reject
+
+    Accept --> TaskList
+    TaskList --> Scheduler
+    Scheduler --> Plan
+
+    ManualEntry["Manual task entry\n(existing form, untouched)"] --> TaskList
+
+    classDef human fill:#fef3c7,stroke:#b45309;
+    class HumanCheck human;
