@@ -36,8 +36,11 @@ python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# Get a free Gemini API key from Google AI Studio, then:
+# Get a free Gemini API key from Google AI Studio, then either:
 export GEMINI_API_KEY="your-key-here"  # Windows: set GEMINI_API_KEY=your-key-here
+# ...or create a local .env file (gitignored, never committed) containing:
+#   GEMINI_API_KEY=your-key-here
+# app.py and demo_advisor.py both load .env automatically via python-dotenv.
 
 streamlit run app.py
 ```
