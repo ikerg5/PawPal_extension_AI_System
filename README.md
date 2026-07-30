@@ -1,4 +1,181 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ Applied AI System — RAG Pet-Care Advisor
+
+## Base project
+
+This project extends **PawPal+ (Module 2 Project)**, a Streamlit pet-care task
+scheduler. The original project let a pet owner track care tasks (walks, feeding,
+grooming, etc.) across multiple pets, generate a time-boxed daily schedule ordered
+by priority, detect same-time scheduling conflicts, and auto-create the next
+occurrence of recurring tasks. It was entirely deterministic, rule-based Python —
+no AI/LLM involved.
+
+## What's new: AI Care Advisor (RAG)
+
+This extension adds a **retrieval-augmented AI advisor**. Given a pet's species and
+optional owner context, it retrieves grounded guidance from a small local knowledge
+base (`knowledge_base/*.md`), asks Gemini to propose concrete care tasks citing
+which document(s) informed each one, runs every suggestion through a guardrail
+layer that blocks medical/dosage-like content, and — only after the owner clicks
+"Accept" on a specific suggestion — turns it into a real `Task` object via the
+existing `Pet.add_task()`. Accepted tasks flow through the original, unmodified
+`Scheduler` (priority sort, conflict detection, time-budget fitting) exactly like
+any manually entered task.
+
+### Architecture Overview
+
+See [`diagrams/architecture.mmd`](diagrams/architecture.mmd) for the full Mermaid
+diagram. In short: **Owner input → Retriever (queries `knowledge_base/`) → Prompt
+builder → Gemini API → Guardrail/validator → human accept/reject checkpoint →
+existing `Pet.add_task()` / `Scheduler` → `DailyPlan`.** Every advisor call —
+accepted, rejected, or errored — is logged to `logs/advisor_log.jsonl`.
+
+### Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# Get a free Gemini API key from Google AI Studio, then:
+export GEMINI_API_KEY="your-key-here"  # Windows: set GEMINI_API_KEY=your-key-here
+
+streamlit run app.py
+```
+
+The advisor UI appears as a new "🤖 AI Care Advisor" section in the app, below
+manual task entry. If `GEMINI_API_KEY` is not set, the section still renders — it
+shows a friendly error instead of crashing (see Guardrails below).
+
+### Sample Interactions
+
+These are real, unedited outputs from a live run against the Gemini API (captured
+via `python demo_advisor.py`, reproducible by anyone with a `GEMINI_API_KEY` set —
+see [`demo_advisor.py`](demo_advisor.py)).
+
+**1. Dog, no extra context:**
+
+```
+=== Live Gemini call: dog, no extra context ===
+Retrieved docs: ['dog_care', 'general_safety']
+Accepted suggestions (5):
+  - Morning Walk | 30 min | high priority | daily | source: ['dog_care', 'general_safety']
+    rationale: A brisk morning walk provides essential daily exercise and handles bathroom needs for Biscuit.
+  - Morning Feeding | 10 min | high priority | daily | source: ['dog_care', 'general_safety']
+    rationale: Adult dogs need to be fed twice a day as missing meals directly impacts their health.
+  - Evening Feeding | 10 min | high priority | daily | source: ['dog_care', 'general_safety']
+    rationale: Providing a second daily meal ensures proper health and consistent nutrition.
+  - Daily Play or Training Session | 15 min | medium priority | daily | source: ['dog_care', 'general_safety']
+    rationale: Short daily play or training sessions provide mental enrichment and prevent boredom-related behavior issues.
+  - Coat Brushing | 15 min | low priority | weekly | source: ['dog_care', 'general_safety']
+    rationale: Weekly brushing serves as basic coat maintenance and is a low-priority maintenance task.
+```
+
+**2. Cat, with owner context ("indoor cat, low energy"):**
+
+```
+=== Live Gemini call: cat, with owner context ===
+Retrieved docs: ['cat_care', 'general_safety']
+Accepted suggestions (4):
+  - Feed Mochi | 10 min | high priority | daily | source: ['cat_care', 'general_safety']
+    rationale: Scheduled daily feeding provides proper intake monitoring and essential nutrition for daily health.
+  - Scoop Litter Box | 10 min | high priority | daily | source: ['cat_care', 'general_safety']
+    rationale: Scooping daily ensures the box remains usable and allows observation of changes in litter habits.
+  - Interactive Play Session | 15 min | medium priority | daily | source: ['cat_care']
+    rationale: Daily interactive play satisfies a cat's predatory instinct and helps prevent stress-related behavior issues.
+  - Brush Coat | 10 min | low priority | weekly | source: ['cat_care', 'general_safety']
+    rationale: Weekly brushing serves as a low-priority routine task to assist with self-grooming and coat maintenance.
+```
+
+**3. Guardrail demo — synthetic unsafe model response (patched in, since a
+correctly-instructed model won't reliably produce unsafe output on demand; this
+demonstrates the guardrail actually catching it rather than trusting the model):**
+
+```
+=== Guardrail demo: synthetic unsafe model response (patched, not live) ===
+Retrieved docs: ['dog_care', 'general_safety']
+Accepted suggestions (0):
+Rejected by guardrails (1):
+  - BLOCKED: Blocked: contains medical/dosage-like content ('mg').
+```
+
+Corresponding log entries (`logs/advisor_log.jsonl`, pretty-printed excerpt):
+
+```json
+{
+  "timestamp": "2026-07-22T02:01:52.520536+00:00",
+  "pet_name": "Biscuit",
+  "species": "dog",
+  "retrieved_doc_ids": ["dog_care", "general_safety"],
+  "raw_output": "[{\"title\": \"Give medication\", ... \"rationale\": \"Administer 5mg dosage as needed\", ...}]",
+  "accepted_count": 0,
+  "rejected": [
+    {"accepted": false, "reason": "Blocked: contains medical/dosage-like content ('mg').", "suggestion": {}}
+  ]
+}
+```
+
+### Design Decisions
+
+- **Keyword/tag retrieval instead of embeddings.** The knowledge base is four
+  small, static markdown files. A vector database or embedding model would add
+  setup cost and a new dependency with no real benefit at this scale — simple
+  species-match plus keyword-overlap scoring (`advisor/retriever.py`) is
+  transparent, fast, and easy to unit test.
+- **Guardrail is a second, independent check — not just a prompt instruction.**
+  The system prompt tells the model never to give medical/dosage advice, but
+  `advisor/guardrails.py` re-validates every suggestion's text against a keyword
+  blocklist regardless of what the prompt says. Trusting only the prompt would mean
+  one model slip-up reaches the user; the guardrail is the actual enforcement point.
+- **Suggestions never auto-populate the task list.** Every suggestion requires an
+  explicit per-item "Accept" click. This keeps a human in the loop for every piece
+  of AI-generated content that becomes real application state.
+- **Gemini over Claude.** The project initially used the Anthropic API but was
+  switched to Google's Gemini API (`gemini-flash-latest`) to use a free-tier key
+  instead of a paid one — see `model_card.md` for the model-name issue this
+  surfaced during testing.
+
+### Testing Summary
+
+```
+$ python -m pytest -v
+============================= test session starts ==============================
+collected 24 items
+
+tests/test_advisor_service.py::test_well_formed_response_produces_accepted_suggestions PASSED [  4%]
+tests/test_advisor_service.py::test_markdown_fenced_response_is_parsed_correctly PASSED [  8%]
+tests/test_advisor_service.py::test_malformed_model_output_does_not_crash PASSED [ 12%]
+tests/test_advisor_service.py::test_llm_api_error_is_handled_gracefully PASSED [ 16%]
+tests/test_advisor_service.py::test_unsafe_suggestion_is_rejected_not_shown_as_accepted PASSED [ 20%]
+tests/test_guardrails.py::test_clean_suggestion_is_accepted PASSED       [ 25%]
+tests/test_guardrails.py::test_dosage_keyword_is_rejected PASSED         [ 29%]
+tests/test_guardrails.py::test_missing_title_is_rejected PASSED          [ 33%]
+tests/test_guardrails.py::test_out_of_range_duration_is_clamped_not_rejected PASSED [ 37%]
+tests/test_guardrails.py::test_invalid_priority_falls_back_to_medium PASSED [ 41%]
+tests/test_guardrails.py::test_sanitize_context_truncates_long_input PASSED [ 45%]
+tests/test_pawpal.py (10 original scheduler tests) ....................... PASSED [ 45%-87%]
+tests/test_retriever.py::test_retrieve_returns_species_specific_doc_plus_general PASSED [ 91%]
+tests/test_retriever.py::test_retrieve_unknown_species_returns_only_general_docs PASSED [ 95%]
+tests/test_retriever.py::test_retrieve_empty_docs_list_returns_empty PASSED [100%]
+
+============================== 24 passed in 0.03s ===============================
+```
+
+**24 of 24 tests passed** (10 original scheduler tests + 14 new advisor tests: 5
+service-level, 6 guardrail, 3 retriever). All Gemini calls are mocked in the
+automated suite (`unittest.mock.patch`) so tests run offline and deterministically;
+the live-model behavior is separately demonstrated above via `demo_advisor.py`.
+The guardrail correctly caught the one synthetic unsafe case it was tested against
+(dosage keyword), and both live-model runs produced suggestions grounded in and
+citing the correct retrieved documents with no unsafe content — 2/2 live runs
+usable without edits.
+
+**Reflection:** the graded responsible-AI reflection — collaboration with AI, one
+helpful and one flawed AI suggestion, and system limitations — is documented in
+[`model_card.md`](model_card.md), not here.
+
+---
+
+## PawPal+ (Module 2 Project)
 
 You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
 
